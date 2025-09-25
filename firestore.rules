@@ -1,0 +1,106 @@
+rules_version = '2';
+
+// NOTE: These rules are a starting point and should be customized for your specific needs.
+// Always test your rules thoroughly in the Firebase console simulator before deploying.
+service cloud.firestore {
+  match /databases/{database}/documents {
+  
+    // =================================================================
+    // Helper Functions
+    // =================================================================
+    
+    // Checks if the user is authenticated.
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    // Gets the role of the currently authenticated user from the 'users' collection.
+    // This is a common pattern for role-based access control.
+    function getUserRole(userId) {
+      return get(/databases/$(database)/documents/users/$(userId)).data.role;
+    }
+    
+    // Checks if the user has an 'ADMIN' role (or any sub-admin role).
+    function isAdmin() {
+      // In a real app, you might have multiple admin levels.
+      return isSignedIn() && (getUserRole(request.auth.uid) == 'ADMIN' || getUserRole(request.auth.uid) == 'Super Admin');
+    }
+    
+    // Checks if the user is the owner of a document.
+    function isOwner(userId) {
+      return request.auth.uid == userId;
+    }
+
+    // =================================================================
+    // Collection-Specific Rules
+    // =================================================================
+
+    // --- Users Collection ---
+    match /users/{userId} {
+      // Allow any authenticated user to create their own user document (for signup).
+      allow create: if isSignedIn();
+      
+      // A user can only read or update their own document. Admins can read any user's document.
+      allow read: if isOwner(userId) || isAdmin();
+      allow update: if isOwner(userId);
+      
+      // Only admins can delete user accounts.
+      allow delete: if isAdmin();
+    }
+    
+    // --- Trips Collection ---
+    match /trips/{tripId} {
+      // Anyone can read published trips.
+      allow get: if resource.data.status == 'Published';
+      allow list: if true; // Allows querying the collection.
+      
+      // Only verified organizers or admins can create or update trips.
+      allow create: if isSignedIn() && (getUserRole(request.auth.uid) == 'ORGANIZER' || isAdmin());
+      
+      // An update is allowed if the user is the trip's organizer or an admin.
+      allow update: if isSignedIn() && (resource.data.organizerId == request.auth.uid || isAdmin());
+      
+      // Only admins can delete trips.
+      allow delete: if isAdmin();
+    }
+    
+    // --- Organizers Collection ---
+    match /organizers/{organizerId} {
+        // Any authenticated user can create an organizer profile (initial signup).
+        allow create: if isSignedIn();
+
+        // Organizers can read/update their own profile. Admins can read any.
+        allow read: if isOwner(organizerId) || isAdmin();
+        allow update: if isOwner(organizerId);
+
+        // Only Admins can delete.
+        allow delete: if isAdmin();
+    }
+    
+    // --- Bookings Collection ---
+    match /bookings/{bookingId} {
+      // Any authenticated user can create a booking.
+      allow create: if isSignedIn();
+      
+      // A user can read their own booking. The trip organizer can also read it. Admins can read any booking.
+      allow read: if isSignedIn() && 
+                    (isOwner(resource.data.userId) || 
+                     resource.data.tripId in get(/databases/$(database)/documents/organizers/$(request.auth.uid)).data.tripIds || // Example check
+                     isAdmin());
+                     
+      // Users can update a booking to cancel it. Organizers/admins might update status.
+      allow update: if isSignedIn() && (isOwner(resource.data.userId) || isAdmin());
+    }
+
+    // --- Reviews Sub-collection ---
+    // This assumes reviews are a sub-collection of trips.
+    match /trips/{tripId}/reviews/{reviewId} {
+        // Anyone can read reviews.
+        allow read: if true;
+        // Only authenticated users who have booked the trip can create a review.
+        // The `exists()` check is a powerful way to enforce such rules.
+        allow create: if isSignedIn() && exists(/databases/$(database)/documents/bookings/{bookingId}) where get(/databases/$(database)/documents/bookings/{bookingId}).data.userId == request.auth.uid && get(/databases/$(database)/documents/bookings/{bookingId}).data.tripId == tripId;
+    }
+    
+  }
+}
